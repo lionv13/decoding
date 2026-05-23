@@ -1,0 +1,102 @@
+import pandas as pd
+import numpy as np
+import re
+
+# File paths
+answer_key_path = "/Users/gast/Documents/biocheck/trabajos/2026/mayo/decode/Biocheck answer-key (1).xlsx"
+csv_data_path = r"/Users/gast/Documents/biocheck/trabajos/2026/mayo/decode/export_combo_for UNIBO_20052026.csv"
+output_path = csv_data_path.replace(".csv", "_decoded.csv")
+
+# Load answer key
+survey_key = "Pigs"
+xls = pd.ExcelFile(answer_key_path)
+keys_dict = pd.read_excel(xls, "Biocheck." + survey_key)
+
+# Build the survey dictionary
+add_ind = 0
+survey_dictionary = {}
+excel_lines = [list(keys_dict[col]) for col in keys_dict]
+
+row = 0
+while row < len(excel_lines[0]):
+    if (
+        str(excel_lines[1][row]) != "nan" and
+        str(excel_lines[3 + add_ind][row]) != "nan" and
+        not str(excel_lines[3 + add_ind][row]).startswith("Numeric") and
+        not str(excel_lines[3 + add_ind][row]).startswith("String") and
+        not isinstance(excel_lines[4 + add_ind][row], str)
+    ):
+        question_text = str(excel_lines[2 + add_ind][row]).strip()
+        question_text = re.sub(r"\s{2,}", " ", question_text)
+        question_text = re.sub("\r?\n", " ", question_text)
+        question = str(excel_lines[1][row]) + ". " + question_text
+        survey_dictionary[question] = {}
+
+        get_multiple_choice = True
+        while get_multiple_choice:
+            if str(excel_lines[4 + add_ind][row]) != "nan" and str(excel_lines[3 + add_ind][row]) != "nan":
+                key_num = int(excel_lines[4 + add_ind][row])
+                answer_str = str(excel_lines[3 + add_ind][row]).strip()
+                survey_dictionary[question][key_num] = answer_str
+            row += 1
+            if row < len(excel_lines[1]):
+                get_multiple_choice = str(excel_lines[1][row]) == "nan"
+            else:
+                get_multiple_choice = False
+        row -= 1
+    row += 1
+
+# Load the CSV data
+df = pd.read_csv(csv_data_path, delimiter=";", encoding="utf-8", low_memory=False)
+decoded_df = df.copy()
+decoded_df.rename(columns={col: col.strip() for col in decoded_df.columns}, inplace=True)
+
+# Match columns directly by full question text or by Roman/Arabic prefix
+question_keys = list(survey_dictionary.keys())
+question_number_map = {k.split(".")[0].strip(): k for k in question_keys}
+
+for col in decoded_df.columns:
+    col_clean = col.strip()
+
+    # First try direct match to full question text
+    matched_key = None
+    if col_clean in survey_dictionary:
+        matched_key = col_clean
+    else:
+        # Try match by question number or Roman numeral
+        match = re.match(r"^([IVXLCDM\d]+)\.", col_clean)
+        if match:
+            qnum = match.group(1)
+            matched_key = question_number_map.get(qnum)
+
+    if matched_key and matched_key in survey_dictionary:
+        mapping = survey_dictionary[matched_key]
+        new_values = []
+
+        for val in decoded_df[col_clean].astype(str):
+            if pd.isna(val) or val.strip().lower() == "nan" or val.strip() == "":
+                new_values.append("")
+                continue
+
+            val = val.strip()
+            if "|" in val:
+                parts = [p.strip() for p in val.split("|")]
+                decoded_parts = []
+                for p in parts:
+                    if p.isdigit() and int(p) in mapping:
+                        decoded_parts.append(mapping[int(p)])
+                    else:
+                        decoded_parts.append(p)
+                new_values.append(" | ".join(decoded_parts))
+            else:
+                try:
+                    idx = int(float(val))
+                    new_values.append(mapping.get(idx, val))
+                except ValueError:
+                    new_values.append(val)
+
+        decoded_df[col_clean] = new_values
+
+# Save the fully decoded dataset
+decoded_df.to_csv(output_path, sep=";", index=False, encoding="utf-8")
+print(f"✅ Decoded dataset saved to: {output_path}")

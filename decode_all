@@ -1,18 +1,19 @@
 import pandas as pd
 import re
+import os
 
 # ============================================================
 # FILE PATHS
 # ============================================================
 
+# One answer-key workbook for ALL species, including beef and dairy cattle
 answer_key_path = "/Users/gast/Documents/biocheck/trabajos/2026/mayo/decode/updated Biocheck Answer - key 2025.xlsx"
 
-# Special answer-key workbook for dairy and beef cattle
-cattle_answer_key_path = "/Users/gast/Documents/biocheck/trabajos/2026/mayo/decode/Biocheck answer-key (1).xlsx"
-
+# Encoded workbook to decode
 excel_data_path = "/Users/gast/Documents/biocheck/trabajos/2026/Junio/Summary with all cleandata Czechia_2025_validated.xlsx"
 
-output_path = excel_data_path.replace(".xlsx", "_encoded.xlsx")
+# Output decoded workbook
+output_path = excel_data_path.replace(".xlsx", "_decoded.xlsx")
 
 
 # ============================================================
@@ -36,7 +37,7 @@ def is_number_like(x):
     try:
         float(str(x).strip())
         return True
-    except ValueError:
+    except Exception:
         return False
 
 
@@ -47,6 +48,55 @@ def to_int_safe(x):
         return int(float(str(x).strip()))
     except Exception:
         return None
+
+
+def normalize_question_number(x):
+    """
+    Makes answer-key question numbers and workbook column numbers comparable.
+
+    Examples:
+        1.0   -> 1
+        1     -> 1
+        2.1   -> 2.1
+        II    -> II
+        VIII. -> VIII
+    """
+    if is_empty(x):
+        return None
+
+    s = str(x).strip()
+    s = s.rstrip(".").strip()
+
+    # Roman numerals
+    if re.fullmatch(r"[IVXLCDM]+", s, flags=re.IGNORECASE):
+        return s.upper()
+
+    # Convert numeric-looking values while preserving decimals like 2.1
+    try:
+        f = float(s)
+        if f.is_integer():
+            return str(int(f))
+        return str(f).rstrip("0").rstrip(".")
+    except Exception:
+        return s
+
+
+def extract_question_number_from_column(col):
+    """
+    Extracts question number from a column name.
+
+    Examples:
+        '1. Are cattle being purchased?' -> 1
+        '2.1. How often...' -> 2.1
+        'II. Who performs...' -> II
+    """
+    col = str(col).strip()
+
+    match = re.match(r"^([IVXLCDM]+|\d+(?:\.\d+)*)\.\s+", col, flags=re.IGNORECASE)
+    if match:
+        return normalize_question_number(match.group(1))
+
+    return None
 
 
 # ============================================================
@@ -69,8 +119,10 @@ def detect_species_from_sheet(df, sheet_name):
         ("veal calves", ["veal calves", "veal"]),
         ("small ruminants meat", ["small ruminants meat", "small meat", "srmeat"]),
         ("small ruminants dairy", ["small ruminants dairy", "small dairy", "srdairy"]),
-        ("poultry backyards", ["poultry backyards", "backyard poultry", "backyards"]),
-        ("pigs outdoor", ["pigs outdoor"]),
+        ("poultry backyards", ["poultry backyards", "backyard poultry", "backyards", "backyard"]),
+        ("pigs indoor old", ["pigs indoor old", "indoor old"]),
+        ("pigs indoor new", ["pigs indoor new", "indoor new"]),
+        ("pigs outdoor", ["pigs outdoor", "outdoor pigs"]),
         ("pigs", ["pigs indoor", "pigs", "pig", "swine"]),
     ]
 
@@ -80,13 +132,8 @@ def detect_species_from_sheet(df, sheet_name):
                 return species
 
     possible_species_columns = [
-        "animal species",
-        "species",
-        "survey",
-        "questionnaire",
-        "animal_specie",
-        "specie",
-        "production type",
+        "animal species", "species", "survey", "questionnaire",
+        "animal_specie", "specie", "production type"
     ]
 
     normalized_cols = {normalize_text(col): col for col in df.columns}
@@ -108,61 +155,46 @@ def detect_species_from_sheet(df, sheet_name):
 
 def find_matching_answer_sheet(answer_xls, detected_species, input_sheet):
     sheet_norm = normalize_text(input_sheet)
+    detected_norm = normalize_text(detected_species)
 
     explicit_mapping = {
         "pigs indoor old": "Biocheck.Pigs_indoor_old",
         "pigs indoor new": "Biocheck.Pigs_indoor_new",
         "pigs outdoor": "Biocheck.Pigs_outdoor",
-        "broilers": "Biocheck.Broilers",
-        "laying hens": "Biocheck.Laying hens",
         "free range layers": "Biocheck.Free Range Layers",
         "free range broilers": "Biocheck.Free Range Broilers",
+        "poultry backyards": "Biocheck.Backyard Poultry",
+        "laying hens": "Biocheck.Laying hens",
+        "broilers": "Biocheck.Broilers",
         "ducks": "Biocheck.Ducks",
         "turkeys": "Biocheck.Turkey",
         "breeders": "Biocheck.Breeders",
-        "poultry backyards": "Biocheck.Backyard Poultry",
-        "backyard": "Biocheck.Backyard Poultry",
         "dairy cattle": "Biocheck.Dairy cattle",
         "beef cattle": "Biocheck.Beef cattle",
-        "veal": "Biocheck.Veal calves",
+        "veal calves": "Biocheck.Veal calves",
         "small ruminants meat": "Biocheck.SRmeat",
         "small ruminants dairy": "Biocheck.SRdairy",
     }
 
+    # First match by input sheet name
     for pattern, answer_sheet in explicit_mapping.items():
-        if pattern in sheet_norm:
-            if answer_sheet in answer_xls.sheet_names:
-                return answer_sheet
+        if pattern in sheet_norm and answer_sheet in answer_xls.sheet_names:
+            return answer_sheet
 
-    detected = normalize_text(detected_species)
+    # Then match by detected species
+    for pattern, answer_sheet in explicit_mapping.items():
+        if pattern in detected_norm and answer_sheet in answer_xls.sheet_names:
+            return answer_sheet
 
-    aliases = {
-        "pigs": ["pigs", "pig", "swine"],
-        "pigs outdoor": ["pigs outdoor"],
-        "broilers": ["broilers", "broiler"],
-        "laying hens": ["laying hens", "layers"],
-        "free range layers": ["free range layers"],
-        "free range broilers": ["free range broilers"],
-        "ducks": ["ducks", "duck"],
-        "turkeys": ["turkeys", "turkey"],
-        "breeders": ["breeders", "breeder"],
-        "poultry backyards": ["backyard poultry", "backyards"],
-        "dairy cattle": ["dairy cattle", "dairy"],
-        "beef cattle": ["beef cattle", "beef"],
-        "veal calves": ["veal calves", "veal"],
-        "small ruminants meat": ["small ruminants meat", "srmeat"],
-        "small ruminants dairy": ["small ruminants dairy", "srdairy"],
-    }
-
-    for species, species_aliases in aliases.items():
-        if detected == normalize_text(species):
-            for sheet in answer_xls.sheet_names:
-                sheet_name_norm = normalize_text(sheet)
-                if any(alias in sheet_name_norm for alias in species_aliases):
-                    return sheet
+    # Final fallback
+    for sheet in answer_xls.sheet_names:
+        sheet_key_norm = normalize_text(sheet)
+        if detected_norm in sheet_key_norm or sheet_key_norm in detected_norm:
+            return sheet
 
     raise ValueError(
-        f"No answer-key sheet found for '{input_sheet}' ({detected_species})"
+        f"No answer-key sheet found for '{input_sheet}' ({detected_species}). "
+        f"Available sheets: {answer_xls.sheet_names}"
     )
 
 
@@ -171,193 +203,202 @@ def find_matching_answer_sheet(answer_xls, detected_species, input_sheet):
 # ============================================================
 
 def build_survey_dictionary(keys_dict):
+    """
+    Builds:
+        question_number -> {numeric_code: answer_text}
+
+    The answer-key workbook MUST be read with header=None.
+    This version works for poultry, pigs, beef cattle, and dairy cattle.
+    """
+
     survey_dictionary = {}
-    excel_lines = [list(keys_dict[col]) for col in keys_dict]
+
+    # Do NOT remove empty columns here. The answer key uses fixed column positions,
+    # and cattle has an intentionally empty column before the question text.
+    rows = keys_dict.values.tolist()
+    n_cols = keys_dict.shape[1]
+
+    if n_cols < 5:
+        raise ValueError("Answer-key sheet has fewer than 5 columns; cannot build dictionary.")
+
+    qnum_col = 1
+
+    # Detect whether question text is in column 2 or 3.
+    # Answer and code should be immediately after the question column.
+    candidate_scores = {}
+
+    for question_col in [2, 3]:
+        if question_col + 2 >= n_cols:
+            continue
+
+        score = 0
+        for r in range(len(rows)):
+            qnum = rows[r][qnum_col] if qnum_col < n_cols else None
+            question_text = rows[r][question_col] if question_col < n_cols else None
+            answer = rows[r][question_col + 1] if question_col + 1 < n_cols else None
+            code = rows[r][question_col + 2] if question_col + 2 < n_cols else None
+
+            qnum_norm = normalize_question_number(qnum)
+
+            if qnum_norm is not None and not is_empty(question_text):
+                score += 1
+
+            if not is_empty(answer) and to_int_safe(code) is not None:
+                score += 3
+
+        candidate_scores[question_col] = score
+
+    if not candidate_scores:
+        raise ValueError("Could not detect answer-key column structure.")
+
+    question_col = max(candidate_scores, key=candidate_scores.get)
+    answer_col = question_col + 1
+    code_col = question_col + 2
+
+    print(
+        f"Detected answer-key layout: qnum_col={qnum_col}, "
+        f"question_col={question_col}, answer_col={answer_col}, code_col={code_col}"
+    )
 
     row = 0
+    while row < len(rows):
+        qnum = rows[row][qnum_col] if qnum_col < n_cols else None
+        question_text = rows[row][question_col] if question_col < n_cols else None
+        qnum_norm = normalize_question_number(qnum)
 
-    while row < len(excel_lines[0]):
+        if qnum_norm is not None and not is_empty(question_text):
+            survey_dictionary[qnum_norm] = {}
 
-        if (
-            len(excel_lines) > 4
-            and str(excel_lines[1][row]) != "nan"
-            and str(excel_lines[3][row]) != "nan"
-            and not str(excel_lines[3][row]).startswith("Numeric")
-            and not str(excel_lines[3][row]).startswith("String")
-        ):
-            question_text = str(excel_lines[2][row]).strip()
-            question_text = re.sub(r"\s{2,}", " ", question_text)
-            question_text = re.sub(r"\r?\n", " ", question_text)
+            while row < len(rows):
+                answer = rows[row][answer_col] if answer_col < n_cols else None
+                code = rows[row][code_col] if code_col < n_cols else None
+                code_num = to_int_safe(code)
 
-            question_number = str(excel_lines[1][row]).strip()
-            question = question_number + ". " + question_text
+                if code_num is not None and not is_empty(answer):
+                    answer_str = str(answer).strip()
 
-            survey_dictionary[question] = {}
-
-            get_multiple_choice = True
-
-            while get_multiple_choice:
-
-                col3 = excel_lines[3][row]
-                col4 = excel_lines[4][row]
-
-                col3_num = to_int_safe(col3)
-                col4_num = to_int_safe(col4)
-
-                # Normal format: answer text | number
-                if col4_num is not None and not is_empty(col3):
-                    key_num = col4_num
-                    answer_str = str(col3).strip()
-                    if answer_str.lower() not in ["nan", "numeric", "string"]:
-                        survey_dictionary[question][key_num] = answer_str
-
-                # Reversed format: number | answer text
-                elif col3_num is not None and not is_empty(col4):
-                    key_num = col3_num
-                    answer_str = str(col4).strip()
-                    if answer_str.lower() not in ["nan", "numeric", "string"]:
-                        survey_dictionary[question][key_num] = answer_str
+                    if answer_str.lower() not in [
+                        "nan", "numeric", "string", "numeric value = answer"
+                    ]:
+                        survey_dictionary[qnum_norm][code_num] = answer_str
 
                 row += 1
 
-                if row < len(excel_lines[1]):
-                    get_multiple_choice = str(excel_lines[1][row]) == "nan"
-                else:
-                    get_multiple_choice = False
+                if row >= len(rows):
+                    break
 
-            row -= 1
+                next_qnum = rows[row][qnum_col] if qnum_col < n_cols else None
+                next_question_text = rows[row][question_col] if question_col < n_cols else None
+                next_qnum_norm = normalize_question_number(next_qnum)
+
+                if next_qnum_norm is not None and not is_empty(next_question_text):
+                    break
+
+            continue
 
         row += 1
 
+    survey_dictionary = {
+        qnum: mapping for qnum, mapping in survey_dictionary.items()
+        if len(mapping) > 0
+    }
+
+    print(f"Questions with mappings found: {len(survey_dictionary)}")
     return survey_dictionary
 
 
-def build_reverse_dictionary(survey_dictionary):
-    reverse_dictionary = {}
-
-    for question, mapping in survey_dictionary.items():
-        reverse_dictionary[question] = {}
-
-        for number, answer in mapping.items():
-            reverse_dictionary[question][normalize_text(answer)] = number
-
-    return reverse_dictionary
-
-
 # ============================================================
-# ENCODING
+# DECODING
 # ============================================================
 
-def encode_value(value, reverse_mapping):
-    """
-    Converts text answers to numbers.
-    Leaves already numeric values unchanged.
-
-    For matrix questions like Q10:
-        always | never | always
-    becomes:
-        1|2|3
-
-    because each pipe-separated answer corresponds to a statement position.
-    """
-
+def decode_value(value, mapping):
     if is_empty(value):
         return ""
 
     value_str = str(value).strip()
 
-    # Already encoded single number
-    if is_number_like(value_str):
-        return value
-
     # Matrix / multiple answers separated by |
     if "|" in value_str:
         parts = [p.strip() for p in value_str.split("|")]
-        encoded_parts = []
+        decoded_parts = []
 
-        for i, part in enumerate(parts, start=1):
-
-            if is_empty(part):
-                encoded_parts.append("")
-                continue
-
-            if is_number_like(part):
-                encoded_parts.append(str(int(float(part))))
+        for part in parts:
+            num = to_int_safe(part)
+            if num is not None and num in mapping:
+                decoded_parts.append(mapping[num])
             else:
-                # Matrix encoding by position
-                encoded_parts.append(str(i))
+                decoded_parts.append(part)
 
-        return "|".join(encoded_parts)
+        return " | ".join(decoded_parts)
 
-    # Normal single-choice question
-    clean_value = normalize_text(value_str)
-    mapped_value = reverse_mapping.get(clean_value)
+    # Single numeric answer
+    num = to_int_safe(value_str)
 
-    if mapped_value is not None:
-        return mapped_value
+    if num is not None and num in mapping:
+        return mapping[num]
 
     return value
 
 
-def encode_dataframe(df, survey_dictionary):
-    encoded_df = df.copy()
-    encoded_df.rename(columns={col: str(col).strip() for col in encoded_df.columns}, inplace=True)
+def decode_dataframe(df, survey_dictionary):
+    decoded_df = df.copy()
+    decoded_df.rename(columns={col: str(col).strip() for col in decoded_df.columns}, inplace=True)
 
-    reverse_dictionary = build_reverse_dictionary(survey_dictionary)
+    decoded_columns = []
+    unmatched_question_columns = []
 
-    question_keys = list(survey_dictionary.keys())
+    for col in decoded_df.columns:
+        qnum = extract_question_number_from_column(col)
 
-    # Case-insensitive full question matching
-    normalized_question_map = {
-        normalize_text(k): k
-        for k in question_keys
-    }
+        if qnum is not None and qnum in survey_dictionary:
+            mapping = survey_dictionary[qnum]
+            before = decoded_df[col].copy()
 
-    # Question-number matching
-    question_number_map = {
-        k.split(".")[0].strip(): k
-        for k in question_keys
-    }
+            decoded_df[col] = decoded_df[col].apply(lambda x: decode_value(x, mapping))
 
-    for col in encoded_df.columns:
-        col_clean = str(col).strip()
-        col_norm = normalize_text(col_clean)
+            if not before.equals(decoded_df[col]):
+                decoded_columns.append(col)
 
-        matched_key = None
+        elif qnum is not None:
+            unmatched_question_columns.append(col)
 
-        # Full question match, case-insensitive
-        if col_norm in normalized_question_map:
-            matched_key = normalized_question_map[col_norm]
+    print(f"Columns decoded: {len(decoded_columns)}")
+    if decoded_columns:
+        print("Decoded columns examples:", decoded_columns[:10])
 
-        # Match by prefix before dot: 1. / II. / IV.
-        else:
-            match = re.match(r"^([IVXLCDM\d]+)\.", col_clean, flags=re.IGNORECASE)
-            if match:
-                qnum = match.group(1).strip()
-                matched_key = question_number_map.get(qnum)
+    if unmatched_question_columns:
+        print("Unmatched question columns examples:", unmatched_question_columns[:10])
 
-        if matched_key and matched_key in reverse_dictionary:
-            reverse_mapping = reverse_dictionary[matched_key]
-            encoded_df[col] = encoded_df[col].apply(
-                lambda x: encode_value(x, reverse_mapping)
-            )
-
-    return encoded_df
+    return decoded_df
 
 
 # ============================================================
 # MAIN PROCESS
 # ============================================================
 
+if not os.path.exists(excel_data_path):
+    raise FileNotFoundError(
+        f"Input workbook not found:\n{excel_data_path}\n\n"
+        "Check that the file name and folder are exactly correct."
+    )
+
+if not os.path.exists(answer_key_path):
+    raise FileNotFoundError(
+        f"Answer-key workbook not found:\n{answer_key_path}\n\n"
+        "Check that the file name and folder are exactly correct."
+    )
+
 input_xls = pd.ExcelFile(excel_data_path)
 answer_xls = pd.ExcelFile(answer_key_path)
-cattle_xls = pd.ExcelFile(cattle_answer_key_path)
+
+print("Input sheets:", input_xls.sheet_names)
+print("Answer-key sheets:", answer_xls.sheet_names)
 
 with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-
     for input_sheet in input_xls.sheet_names:
-
-        print(f"\nProcessing sheet: {input_sheet}")
+        print("\n============================================================")
+        print(f"Processing sheet: {input_sheet}")
+        print("============================================================")
 
         df = pd.read_excel(input_xls, sheet_name=input_sheet)
         df.rename(columns={col: str(col).strip() for col in df.columns}, inplace=True)
@@ -369,65 +410,25 @@ with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
 
         try:
             detected_species = detect_species_from_sheet(df, input_sheet)
-            answer_sheet = find_matching_answer_sheet(
-                answer_xls,
-                detected_species,
-                input_sheet
-            )
-
             print(f"Detected species: {detected_species}")
 
-            # =====================================================
-            # Dairy and Beef use the alternate cattle answer key
-            # =====================================================
+            answer_sheet = find_matching_answer_sheet(answer_xls, detected_species, input_sheet)
 
-            if detected_species == "dairy cattle":
-                print("Using answer-key workbook: Biocheck answer-key (1).xlsx")
-                print("Using answer-key sheet: Biocheck.Dairy cattle")
+            print("Using answer-key workbook: updated Biocheck Answer - key 2025.xlsx")
+            print(f"Using answer-key sheet: {answer_sheet}")
 
-                keys_dict = pd.read_excel(
-                    cattle_xls,
-                    sheet_name="Biocheck.Dairy cattle"
-                )
-
-            elif detected_species == "beef cattle":
-                print("Using answer-key workbook: Biocheck answer-key (1).xlsx")
-                print("Using answer-key sheet: Biocheck.Beef cattle")
-
-                keys_dict = pd.read_excel(
-                    cattle_xls,
-                    sheet_name="Biocheck.Beef cattle"
-                )
-
-            else:
-                print("Using answer-key workbook: updated Biocheck Answer - key 2025.xlsx")
-                print(f"Using answer-key sheet: {answer_sheet}")
-
-                keys_dict = pd.read_excel(
-                    answer_xls,
-                    sheet_name=answer_sheet
-                )
+            # IMPORTANT: header=None preserves the answer-key columns.
+            keys_dict = pd.read_excel(answer_xls, sheet_name=answer_sheet, header=None)
 
             survey_dictionary = build_survey_dictionary(keys_dict)
+            decoded_df = decode_dataframe(df, survey_dictionary)
 
-            encoded_df = encode_dataframe(df, survey_dictionary)
-
-            encoded_df.to_excel(
-                writer,
-                sheet_name=input_sheet[:31],
-                index=False
-            )
-
-            print("Sheet encoded successfully.")
+            decoded_df.to_excel(writer, sheet_name=input_sheet[:31], index=False)
+            print("Sheet decoded successfully.")
 
         except Exception as e:
-            print(f"⚠️ Could not encode sheet '{input_sheet}'. Copied original sheet.")
+            print(f"WARNING: Could not decode sheet '{input_sheet}'. Copied original sheet.")
             print(f"Reason: {e}")
+            df.to_excel(writer, sheet_name=input_sheet[:31], index=False)
 
-            df.to_excel(
-                writer,
-                sheet_name=input_sheet[:31],
-                index=False
-            )
-
-print(f"\n✅ Encoded workbook saved to: {output_path}")
+print(f"\nDecoded workbook saved to: {output_path}")

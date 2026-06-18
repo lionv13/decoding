@@ -1,102 +1,297 @@
 import pandas as pd
-import numpy as np
 import re
+import os
 
-# File paths
-answer_key_path = "/Users/gast/Documents/biocheck/trabajos/2026/mayo/decode/Biocheck answer-key (1).xlsx"
-csv_data_path = r"/Users/gast/Documents/biocheck/trabajos/2026/mayo/decode/export_combo_for UNIBO_20052026.csv"
-output_path = csv_data_path.replace(".csv", "_decoded.csv")
+# =============================================================
+# File paths and survey
+# =============================================================
 
-# Load answer key
-survey_key = "Pigs"
+answer_key_path = "/Users/gast/Documents/biocheck/trabajos/2026/mayo/decode/updated Biocheck Answer - key 2025.xlsx"
+data_path = "/Users/gast/Documents/biocheck/trabajos/2025/mayo/rawdata/submissions-pigs_indoor_old.xlsx"
+
+# Paste your desired output folder here
+output_folder = "/Users/gast/Documents/biocheck/trabajos/2026/test"
+
+# Species / survey name
+survey_key = "Pigs_indoor_old"
+
+# =============================================================
+# Output path
+# =============================================================
+
+os.makedirs(output_folder, exist_ok=True)
+
+safe_species = survey_key.replace(" ", "_")
+input_filename = os.path.splitext(os.path.basename(data_path))[0]
+
+output_path = os.path.join(
+    output_folder,
+    f"{input_filename}_{safe_species}_decoded.xlsx"
+)
+
+# =============================================================
+# Load input data automatically: CSV or Excel
+# =============================================================
+
+extension = os.path.splitext(data_path)[1].lower()
+
+if extension == ".csv":
+    df = pd.read_csv(
+        data_path,
+        sep=";",
+        encoding="utf-8",
+        low_memory=False
+    )
+
+elif extension in [".xlsx", ".xls"]:
+    df = pd.read_excel(data_path)
+
+else:
+    raise ValueError(
+        f"Unsupported file format: {extension}. Please use CSV, XLSX, or XLS."
+    )
+
+decoded_df = df.copy()
+decoded_df.rename(
+    columns={col: str(col).strip() for col in decoded_df.columns},
+    inplace=True
+)
+
+# =============================================================
+# Load answer key and find the correct sheet
+# =============================================================
+
 xls = pd.ExcelFile(answer_key_path)
-keys_dict = pd.read_excel(xls, "Biocheck." + survey_key)
+available_sheets = xls.sheet_names
 
-# Build the survey dictionary
-add_ind = 0
+exact_sheet = f"Biocheck.{survey_key}"
+
+if exact_sheet in available_sheets:
+    sheet_name = exact_sheet
+else:
+    matching_sheets = [
+        sheet for sheet in available_sheets
+        if survey_key.lower() in sheet.lower()
+    ]
+
+    if len(matching_sheets) == 0:
+        raise ValueError(
+            f"No sheet found containing species name: '{survey_key}'. "
+            f"Available sheets are: {available_sheets}"
+        )
+
+    sheet_name = matching_sheets[0]
+
+print(f"✅ Answer-key sheet used: {sheet_name}")
+
+keys_dict = pd.read_excel(answer_key_path, sheet_name=sheet_name)
+
+# =============================================================
+# Build survey dictionary
+# =============================================================
+
+# IMPORTANT:
+# For the uploaded 2025 Biocheck answer key, Dairy cattle uses add_ind = 1.
+add_ind = 1
+
 survey_dictionary = {}
 excel_lines = [list(keys_dict[col]) for col in keys_dict]
 
 row = 0
+
 while row < len(excel_lines[0]):
+
     if (
-        str(excel_lines[1][row]) != "nan" and
-        str(excel_lines[3 + add_ind][row]) != "nan" and
-        not str(excel_lines[3 + add_ind][row]).startswith("Numeric") and
-        not str(excel_lines[3 + add_ind][row]).startswith("String") and
-        not isinstance(excel_lines[4 + add_ind][row], str)
+        str(excel_lines[1][row]) != "nan"
+        and str(excel_lines[3 + add_ind][row]) != "nan"
+        and not str(excel_lines[3 + add_ind][row]).startswith("Numeric")
+        and not str(excel_lines[3 + add_ind][row]).startswith("String")
+        and not isinstance(excel_lines[4 + add_ind][row], str)
     ):
+
         question_text = str(excel_lines[2 + add_ind][row]).strip()
         question_text = re.sub(r"\s{2,}", " ", question_text)
-        question_text = re.sub("\r?\n", " ", question_text)
-        question = str(excel_lines[1][row]) + ". " + question_text
+        question_text = re.sub(r"\r?\n", " ", question_text)
+
+        question = str(excel_lines[1][row]).strip() + ". " + question_text
         survey_dictionary[question] = {}
 
         get_multiple_choice = True
+
         while get_multiple_choice:
-            if str(excel_lines[4 + add_ind][row]) != "nan" and str(excel_lines[3 + add_ind][row]) != "nan":
-                key_num = int(excel_lines[4 + add_ind][row])
-                answer_str = str(excel_lines[3 + add_ind][row]).strip()
-                survey_dictionary[question][key_num] = answer_str
+
+            if (
+                str(excel_lines[4 + add_ind][row]) != "nan"
+                and str(excel_lines[3 + add_ind][row]) != "nan"
+            ):
+                try:
+                    key_num = int(float(excel_lines[4 + add_ind][row]))
+                    answer_str = str(excel_lines[3 + add_ind][row]).strip()
+                    survey_dictionary[question][key_num] = answer_str
+                except Exception:
+                    pass
+
             row += 1
+
             if row < len(excel_lines[1]):
                 get_multiple_choice = str(excel_lines[1][row]) == "nan"
             else:
                 get_multiple_choice = False
+
         row -= 1
+
     row += 1
 
-# Load the CSV data
-df = pd.read_csv(csv_data_path, delimiter=";", encoding="utf-8", low_memory=False)
-decoded_df = df.copy()
-decoded_df.rename(columns={col: col.strip() for col in decoded_df.columns}, inplace=True)
+print(f"✅ Questions loaded from answer key: {len(survey_dictionary)}")
 
-# Match columns directly by full question text or by Roman/Arabic prefix
-question_keys = list(survey_dictionary.keys())
-question_number_map = {k.split(".")[0].strip(): k for k in question_keys}
+# =============================================================
+# Helper: extract question prefix
+# Examples: 1, 2.1, 2.2, 10.3, IV
+# =============================================================
+
+def get_question_prefix(text):
+    text = str(text).strip()
+
+    match = re.match(
+        r"^([IVXLCDM]+|\d+(?:\.\d+)*)",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    if match:
+        return match.group(1).strip().rstrip(".").upper()
+
+    return None
+
+
+def normalize_question_text(text):
+    text = str(text).strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[^\w\s\.]", "", text)
+    return text
+
+# =============================================================
+# Helper: decode values safely
+# =============================================================
+
+def decode_value(value, mapping):
+    """
+    Decodes numeric answers using the answer key.
+    Keeps already-decoded answers such as Always / always / Never.
+    Also works with pipe-separated answers, e.g. 1|2|3.
+    """
+
+    if pd.isna(value):
+        return ""
+
+    value = str(value).strip()
+
+    if value == "" or value.lower() == "nan":
+        return ""
+
+    existing_answers_lower = {
+        str(answer).strip().lower()
+        for answer in mapping.values()
+    }
+
+    def decode_single(part):
+        part = str(part).strip()
+
+        if part == "" or part.lower() == "nan":
+            return ""
+
+        # Keep already decoded answers
+        if part.lower() in existing_answers_lower:
+            return part
+
+        # Decode numeric values: 1, 1.0, 1,0
+        numeric_part = part.replace(",", ".")
+
+        try:
+            number = float(numeric_part)
+
+            if number.is_integer():
+                code = int(number)
+                return mapping.get(code, part)
+
+            return part
+
+        except ValueError:
+            return part
+
+    if "|" in value:
+        parts = [p.strip() for p in value.split("|")]
+        decoded_parts = [decode_single(p) for p in parts]
+        decoded_parts = [p for p in decoded_parts if p != ""]
+        return " | ".join(decoded_parts)
+
+    return decode_single(value)
+
+# =============================================================
+# Match columns and decode
+# =============================================================
+
+question_number_map = {}
+question_text_map = {}
+
+for key in survey_dictionary.keys():
+    prefix = get_question_prefix(key)
+
+    if prefix is not None:
+        question_number_map[prefix] = key
+
+    question_text_map[normalize_question_text(key)] = key
+
+decoded_cols = []
+not_decoded_cols = []
 
 for col in decoded_df.columns:
-    col_clean = col.strip()
-
-    # First try direct match to full question text
+    col_clean = str(col).strip()
     matched_key = None
+
+    col_prefix = get_question_prefix(col_clean)
+    col_norm = normalize_question_text(col_clean)
+
+    # 1. Exact full-question match
     if col_clean in survey_dictionary:
         matched_key = col_clean
-    else:
-        # Try match by question number or Roman numeral
-        match = re.match(r"^([IVXLCDM\d]+)\.", col_clean)
-        if match:
-            qnum = match.group(1)
-            matched_key = question_number_map.get(qnum)
 
-    if matched_key and matched_key in survey_dictionary:
+    # 2. Normalized full-question match
+    elif col_norm in question_text_map:
+        matched_key = question_text_map[col_norm]
+
+    # 3. Match by question number, including 2.1, 2.2, etc.
+    elif col_prefix in question_number_map:
+        matched_key = question_number_map[col_prefix]
+
+    if matched_key is not None:
         mapping = survey_dictionary[matched_key]
-        new_values = []
 
-        for val in decoded_df[col_clean].astype(str):
-            if pd.isna(val) or val.strip().lower() == "nan" or val.strip() == "":
-                new_values.append("")
-                continue
+        decoded_df[col] = decoded_df[col].apply(
+            lambda x: decode_value(x, mapping)
+        )
 
-            val = val.strip()
-            if "|" in val:
-                parts = [p.strip() for p in val.split("|")]
-                decoded_parts = []
-                for p in parts:
-                    if p.isdigit() and int(p) in mapping:
-                        decoded_parts.append(mapping[int(p)])
-                    else:
-                        decoded_parts.append(p)
-                new_values.append(" | ".join(decoded_parts))
-            else:
-                try:
-                    idx = int(float(val))
-                    new_values.append(mapping.get(idx, val))
-                except ValueError:
-                    new_values.append(val)
+        decoded_cols.append(col_clean)
 
-        decoded_df[col_clean] = new_values
+    else:
+        not_decoded_cols.append(col_clean)
 
-# Save the fully decoded dataset
-decoded_df.to_csv(output_path, sep=";", index=False, encoding="utf-8")
-print(f"✅ Decoded dataset saved to: {output_path}")
+print(f"✅ Decoded columns: {len(decoded_cols)}")
+print(f"⚠️ Not decoded columns: {len(not_decoded_cols)}")
+
+if not_decoded_cols:
+    print("\nColumns not decoded:")
+    for col in not_decoded_cols:
+        print(f" - {col}")
+
+# =============================================================
+# Save decoded dataset as Excel
+# =============================================================
+
+decoded_df.to_excel(
+    output_path,
+    index=False,
+    engine="openpyxl"
+)
+
+print(f"\n✅ Decoded dataset saved to: {output_path}")
